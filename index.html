@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#090b10">
+<title>GIF Player</title>
+<style>
+:root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#090b10;color:#fff;overscroll-behavior:none}
+#stage{position:fixed;inset:0;overflow:hidden;background:#090b10;touch-action:none}
+#gif{position:absolute;left:50%;top:50%;max-width:none;max-height:none;transform-origin:center center;will-change:transform;touch-action:none;user-select:none;-webkit-user-select:none;pointer-events:none}
+#empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:28px;text-align:center;color:#dce1eb}
+#empty .symbol{font-size:52px}
+#empty p{max-width:300px;color:#9ca6b7;line-height:1.45;margin:0}
+button,.filelabel{border:0;border-radius:14px;background:#f0f3fa;color:#10131a;padding:13px 18px;font-size:16px;font-weight:650}
+#pick{display:none}
+#toolbar{position:fixed;left:14px;right:14px;bottom:max(14px,env(safe-area-inset-bottom));z-index:5;display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid #343b49;border-radius:18px;background:rgba(18,22,30,.88);backdrop-filter:blur(18px);transition:opacity .25s}
+#toolbar.hidden{opacity:0;pointer-events:none}
+#openBtn{white-space:nowrap;padding:11px 13px;font-size:14px}
+#speedBox{min-width:0;flex:1}
+#speedTop{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#c4ccda;margin-bottom:6px}
+#speedVal{font-variant-numeric:tabular-nums;color:#fff;font-weight:700}
+input[type=range]{width:100%;accent-color:#fff;margin:0}
+#hint{position:fixed;top:max(16px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:4;padding:8px 12px;border-radius:30px;background:rgba(18,22,30,.68);color:#d7deea;font-size:12px;white-space:nowrap;pointer-events:none;transition:opacity .5s}
+#hint.fade{opacity:0}
+#err{position:fixed;left:18px;right:18px;top:50%;transform:translateY(-50%);text-align:center;color:#ffb6b6;font-size:14px;display:none}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="empty"><div class="symbol">∞</div><strong>Dein GIF-Player</strong>
+    <p>Wähle ein GIF aus. Es startet bildschirmfüllend. Ziehe es mit einem Finger und zoome mit zwei Fingern.</p>
+    <label class="filelabel" for="pick">GIF auswählen</label>
+  </div>
+  <canvas id="gif" hidden></canvas><div id="err"></div>
+</div>
+<div id="hint">1 Finger: verschieben · 2 Finger: zoomen · Doppeltippen: Menü</div>
+<div id="toolbar">
+  <label id="openBtn" class="filelabel" for="pick">GIF öffnen</label><input id="pick" type="file" accept="image/gif,.gif">
+  <div id="speedBox"><div id="speedTop"><span>Geschwindigkeit</span><span id="speedVal">1,00×</span></div>
+    <input id="speed" type="range" min="0.25" max="2" step="0.05" value="1" aria-label="Wiedergabegeschwindigkeit">
+  </div>
+</div>
+<script type="module">
+import { parseGIF, decompressFrames } from 'https://esm.sh/gifuct-js@2.1.2';
+const stage=document.querySelector('#stage'),canvas=document.querySelector('#gif'),ctx=canvas.getContext('2d');
+const empty=document.querySelector('#empty'),picker=document.querySelector('#pick'),speed=document.querySelector('#speed');
+const speedVal=document.querySelector('#speedVal'),toolbar=document.querySelector('#toolbar'),hint=document.querySelector('#hint'),err=document.querySelector('#err');
+let frames=[],frameIndex=0,timer=null,rate=1,posX=0,posY=0,scale=1,baseW=0,baseH=0,lastTap=0;
+const pointers=new Map();let gesture=null;
+function showError(msg){err.textContent=msg;err.style.display='block';}
+function fitToScreen(){
+ if(!canvas.width||!canvas.height)return;
+ scale=Math.max(stage.clientWidth/canvas.width,stage.clientHeight/canvas.height);
+ baseW=canvas.width;baseH=canvas.height;posX=0;posY=0;applyTransform();
+}
+function applyTransform(){
+ canvas.style.width=(baseW*scale)+'px';canvas.style.height=(baseH*scale)+'px';
+ canvas.style.transform=`translate(calc(-50% + ${posX}px),calc(-50% + ${posY}px))`;
+}
+function drawFrame(i){
+ const f=frames[i],d=f.dims;
+ ctx.putImageData(new ImageData(new Uint8ClampedArray(f.patch),d.width,d.height),d.left,d.top);
+}
+function scheduleNext(){
+ clearTimeout(timer);if(!frames.length)return;
+ timer=setTimeout(nextFrame,Math.max(20,(frames[frameIndex].delay||100)/rate));
+}
+function nextFrame(){
+ if(!frames.length)return;
+ const prev=frames[frameIndex];frameIndex=(frameIndex+1)%frames.length;
+ if(prev.disposalType===2)ctx.clearRect(prev.dims.left,prev.dims.top,prev.dims.width,prev.dims.height);
+ drawFrame(frameIndex);scheduleNext();
+}
+function startPlayback(){clearTimeout(timer);frameIndex=0;ctx.clearRect(0,0,canvas.width,canvas.height);if(frames.length){drawFrame(0);scheduleNext();}}
+async function loadGif(file){
+ clearTimeout(timer);err.style.display='none';
+ try{
+  const parsed=parseGIF(await file.arrayBuffer());frames=decompressFrames(parsed,true);
+  if(!frames.length)throw new Error('No frames');
+  canvas.width=parsed.lsd.width;canvas.height=parsed.lsd.height;
+  canvas.hidden=false;empty.style.display='none';fitToScreen();startPlayback();
+  hint.classList.remove('fade');setTimeout(()=>hint.classList.add('fade'),3500);
+ }catch(e){showError('Dieses GIF konnte nicht geöffnet werden. Bitte probiere eine andere GIF-Datei.');console.error(e);}
+}
+picker.addEventListener('change',e=>{const f=e.target.files?.[0];if(f)loadGif(f);picker.value='';});
+speed.addEventListener('input',()=>{rate=Number(speed.value);speedVal.textContent=rate.toFixed(2).replace('.',',')+'×';scheduleNext();});
+function distance(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
+function midpoint(a,b){return{x:(a.x+b.x)/2,y:(a.y+b.y)/2};}
+function beginGesture(){
+ const pts=[...pointers.values()];
+ if(pts.length===1)gesture={type:'drag',x:pts[0].x,y:pts[0].y,px:posX,py:posY};
+ else if(pts.length>=2){
+  const a=pts[0],b=pts[1],mid=midpoint(a,b);
+  gesture={type:'pinch',dist:Math.max(1,distance(a,b)),scale,midX:mid.x,midY:mid.y,posX,posY};
+ }
+}
+stage.addEventListener('pointerdown',e=>{
+ if(canvas.hidden)return;
+ if(e.target.closest('#toolbar'))return;
+ const now=Date.now();
+ if(pointers.size===0&&now-lastTap<320){toolbar.classList.toggle('hidden');lastTap=0;return;}
+ lastTap=now;
+ pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+ try{stage.setPointerCapture(e.pointerId);}catch(_){}
+ beginGesture();
+});
+stage.addEventListener('pointermove',e=>{
+ if(!pointers.has(e.pointerId)||!gesture)return;
+ pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+ const pts=[...pointers.values()];
+ if(pts.length===1&&gesture.type==='drag'){
+  posX=gesture.px+(pts[0].x-gesture.x);posY=gesture.py+(pts[0].y-gesture.y);applyTransform();
+ }else if(pts.length>=2){
+  const a=pts[0],b=pts[1],mid=midpoint(a,b),d=distance(a,b);
+  const nextScale=Math.max(0.08,Math.min(12,gesture.scale*d/gesture.dist));
+  const ratio=nextScale/gesture.scale;
+  // Keep the image point under the pinch midpoint fixed while scaling.
+  posX=mid.x-stage.clientWidth/2-(gesture.midX-stage.clientWidth/2-gesture.posX)*ratio;
+  posY=mid.y-stage.clientHeight/2-(gesture.midY-stage.clientHeight/2-gesture.posY)*ratio;
+  scale=nextScale;applyTransform();
+  // Rebase continuously to make the gesture smooth.
+  gesture={type:'pinch',dist:Math.max(1,d),scale,midX:mid.x,midY:mid.y,posX,posY};
+ }
+});
+function endPointer(e){
+ pointers.delete(e.pointerId);
+ if(pointers.size)beginGesture();else gesture=null;
+}
+stage.addEventListener('pointerup',endPointer);stage.addEventListener('pointercancel',endPointer);
+window.addEventListener('resize',()=>{if(!canvas.hidden)applyTransform();});
+</script>
+</body></html>
